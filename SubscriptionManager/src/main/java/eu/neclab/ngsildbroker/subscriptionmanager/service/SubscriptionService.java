@@ -1486,6 +1486,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	}
 
 	@Scheduled(every = "${scorpio.subscription.checkinterval}", delayed = "${scorpio.startupdelay}")
+	@io.smallrye.common.annotation.Blocking
 	Uni<Void> checkIntervalSubs() {
 		List<Uni<Void>> unis = Lists.newArrayList();
 		logger.debug("acquiring log for interval");

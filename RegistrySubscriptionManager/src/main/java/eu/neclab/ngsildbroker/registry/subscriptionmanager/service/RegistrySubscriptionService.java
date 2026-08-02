@@ -1253,6 +1253,7 @@ public class RegistrySubscriptionService implements CSourceHandler {
 	}
 
 	@Scheduled(every = "${scorpio.registry.subscription.checkinterval}", delayed = "${scorpio.startupdelay}")
+	@io.smallrye.common.annotation.Blocking
 	Uni<Void> checkIntervalSubs() {
 		List<Uni<Void>> unis = Lists.newArrayList();
 		for (Cell<String, String, SubscriptionRequest> cell : tenant2subscriptionId2IntervalSubscription.cellSet()) {
