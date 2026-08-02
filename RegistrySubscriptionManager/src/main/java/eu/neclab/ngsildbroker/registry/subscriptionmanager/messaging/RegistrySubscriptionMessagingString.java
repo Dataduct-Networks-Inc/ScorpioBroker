@@ -7,6 +7,7 @@ import org.eclipse.microprofile.reactive.messaging.Incoming;
 import eu.neclab.ngsildbroker.commons.constants.AppConstants;
 import io.quarkus.arc.profile.IfBuildProfile;
 import io.smallrye.mutiny.Uni;
+import io.smallrye.reactive.messaging.annotations.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import io.quarkus.runtime.Startup;
 
@@ -17,6 +18,7 @@ public class RegistrySubscriptionMessagingString extends RegistrySubscriptionMes
 
 	@Incoming(AppConstants.REGISTRY_RETRIEVE_CHANNEL)
 	@Acknowledgment(Strategy.PRE_PROCESSING)
+	@Blocking
 	public Uni<Void> handleCsource(String byteMessage) {
 		return handleCsourceRaw(byteMessage);
 	}

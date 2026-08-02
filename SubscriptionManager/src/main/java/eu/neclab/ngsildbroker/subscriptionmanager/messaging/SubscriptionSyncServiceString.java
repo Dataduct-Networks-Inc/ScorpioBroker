@@ -99,6 +99,7 @@ public class SubscriptionSyncServiceString extends SubscriptionSyncServiceBase {
 	}
 
 	@Scheduled(every = "${scorpio.sync.announcement-time}", delayed = "${scorpio.startupdelay}")
+	@io.smallrye.common.annotation.Blocking
 	Uni<Void> syncTask() {
 		try {
 			microServiceUtils.serializeAndSplitObjectAndEmit(INSTANCE_ID, messageSize, aliveEmitter, objectMapper);
@@ -109,6 +110,7 @@ public class SubscriptionSyncServiceString extends SubscriptionSyncServiceBase {
 	}
 
 	@Scheduled(every = "${scorpio.sync.check-time}", delayed = "${scorpio.startupdelay}")
+	@io.smallrye.common.annotation.Blocking
 	Uni<Void> checkTask() {
 		if (!currentInstances.equals(lastInstances)) {
 			recalculateSubscriptions();
