@@ -37,6 +37,7 @@ import io.quarkus.runtime.Startup;
 import io.quarkus.scheduler.Scheduled;
 import io.smallrye.mutiny.Uni;
 import io.smallrye.reactive.messaging.MutinyEmitter;
+import io.smallrye.reactive.messaging.annotations.Blocking;
 import io.smallrye.reactive.messaging.annotations.Broadcast;
 import io.vertx.mutiny.core.Vertx;
 
@@ -120,6 +121,7 @@ public class SubscriptionSyncServiceString extends SubscriptionSyncServiceBase {
 
 	@Incoming(AppConstants.SUB_SYNC_RETRIEVE_CHANNEL)
 	@Acknowledgment(Strategy.PRE_PROCESSING)
+	@Blocking
 	Uni<Void> listenForSubs(String byteMessage) {
 		SyncMessage message;
 		try {
@@ -134,6 +136,7 @@ public class SubscriptionSyncServiceString extends SubscriptionSyncServiceBase {
 
 	@Incoming(AppConstants.SUB_ALIVE_RETRIEVE_CHANNEL)
 	@Acknowledgment(Strategy.PRE_PROCESSING)
+	@Blocking
 	Uni<Void> listenForAlive(String byteMessage) {
 		logger.debug("receving alive");
 		logger.debug(byteMessage);
