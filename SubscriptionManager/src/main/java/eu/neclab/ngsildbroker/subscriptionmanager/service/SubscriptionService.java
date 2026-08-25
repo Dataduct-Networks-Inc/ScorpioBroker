@@ -554,8 +554,12 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 				.map(url -> url.endsWith("?type=implicitlyCreated")
 						? url.substring(0, url.length() - "?type=implicitlyCreated".length())
 						: url)
+				.filter(url -> !NGSIConstants.CORE_CONTEXT_URLS.contains(url))
+				.distinct()
 				.toList();
-		storedContext.put(NGSIConstants.ORIGINAL_AT_CONTEXT, originalAtContext);
+		if (!originalAtContext.isEmpty()) {
+			storedContext.put(NGSIConstants.ORIGINAL_AT_CONTEXT, originalAtContext);
+		}
 		return storedContext;
 	}
 
