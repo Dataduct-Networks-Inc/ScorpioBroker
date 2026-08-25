@@ -217,21 +217,28 @@ public class SubscriptionController {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, tenant));
 		}
 
-		List<Object> contextHeader = HttpUtils.getAtContext(request);
+		List<Object> requestedContextHeader = HttpUtils.getAtContext(request);
 		Set<String> finalOptions;
 		try {
 			finalOptions = HttpUtils.parseOptionsAndFormat(options, null);
 		} catch (ResponseException e) {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, HttpUtils.getTenant(request)));
 		}
-		return ldService.parse(contextHeader).onItem().transformToUni(context -> {
-			return subService.getSubscription(tenant, subscriptionId).onItem()
-					.transformToUni(subscription -> {
-						fixSub(subscription);
-
-						return HttpUtils.generateSubscriptionResult(contextHeader, context, acceptHeader, subscription,
-								finalOptions, ldService, true);
-					});
+		return subService.getSubscription(tenant, subscriptionId).onItem().transformToUni(subscription -> {
+			Object storedAtContext = subscription.remove(NGSIConstants.JSON_LD_CONTEXT);
+			List<Object> responseContextHeader = new ArrayList<>(requestedContextHeader);
+			if (responseContextHeader.isEmpty()) {
+				if (storedAtContext instanceof List<?> storedContexts) {
+					responseContextHeader.addAll(storedContexts);
+				} else if (storedAtContext != null) {
+					responseContextHeader.add(storedAtContext);
+				}
+			}
+			return ldService.parse(responseContextHeader).onItem().transformToUni(responseContext -> {
+				fixSub(subscription);
+				return HttpUtils.generateSubscriptionResult(responseContextHeader, responseContext, acceptHeader,
+						subscription, finalOptions, ldService, true);
+			});
 		}).onFailure().recoverWithItem(e -> {
 			return HttpUtils.handleControllerExceptions(e, tenant);
 		});
