@@ -32,6 +32,7 @@ import com.github.jsonldjava.core.Context;
 import com.github.jsonldjava.core.JsonLDService;
 import com.google.common.collect.Table;
 
+import eu.neclab.ngsildbroker.commons.constants.NGSIConstants;
 import eu.neclab.ngsildbroker.commons.datatypes.Subscription;
 import eu.neclab.ngsildbroker.commons.datatypes.requests.subscription.DeleteSubscriptionRequest;
 import eu.neclab.ngsildbroker.commons.datatypes.requests.subscription.SubscriptionRequest;
@@ -101,10 +102,20 @@ public class SubscriptionServiceTest {
 		ObjectMapper objectMapper = new ObjectMapper();
 		resolved = objectMapper.readValue(jsonLdObject, Map.class);
 		when(context.serialize()).thenReturn(Map.of("@context", "https://example.test/context.jsonld"));
+		when(context.getOriginalAtContext())
+				.thenReturn(List.of("https://example.test/context.jsonld?type=implicitlyCreated"));
 		when(localContextService.createImplicitly(eq(tenant), any()))
 				.thenReturn(Uni.createFrom().item("urn:context"));
 		when(microServiceUtils.getGatewayString()).thenReturn("http://localhost:9090");
 
+	}
+
+	@Test
+	public void serializeContextForStoragePreservesOriginalContextUrl() {
+		Map<String, Object> storedContext = SubscriptionService.serializeContextForStorage(context);
+
+		assertEquals(List.of("https://example.test/context.jsonld"),
+				storedContext.get(NGSIConstants.ORIGINAL_AT_CONTEXT));
 	}
 
 	@Test
@@ -234,7 +245,9 @@ public class SubscriptionServiceTest {
 		when(rowIteratorMock.next()).thenReturn(rowMock);
 		JsonObject jsonObject = new JsonObject();
 		jsonObject.put("@id", subscriptionId);
-		JsonObject contextBody = new JsonObject().put("@context", "https://example.test/context.jsonld");
+		JsonObject contextBody = new JsonObject()
+				.put("@context", "https://example.test/resolved-context.jsonld")
+				.put(NGSIConstants.ORIGINAL_AT_CONTEXT, List.of("https://example.test/context.jsonld"));
 		when(rowMock.getJsonObject(0)).thenReturn(jsonObject);
 		when(rowMock.getJsonObject(1)).thenReturn(contextBody);
 		when(rowMock.getString(2)).thenReturn("urn:context");
@@ -256,6 +269,7 @@ public class SubscriptionServiceTest {
 		Map<String, Object> result = uniResult.await().indefinitely();
 
 		assertEquals(subscriptionId, result.get("@id"));
+		assertEquals(List.of("https://example.test/context.jsonld"), result.get(NGSIConstants.JSON_LD_CONTEXT));
 		verify(subDAO, times(1)).getSubscription(any(), any());
 
 	}
