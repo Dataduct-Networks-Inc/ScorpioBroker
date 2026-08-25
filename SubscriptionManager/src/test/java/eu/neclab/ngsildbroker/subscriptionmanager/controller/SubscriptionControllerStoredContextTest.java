@@ -14,28 +14,23 @@ import eu.neclab.ngsildbroker.commons.constants.NGSIConstants;
 class SubscriptionControllerStoredContextTest {
 
 	@Test
-	void storedContextIsRemovedFromExpandedSubscriptionAndUsedForCompaction() {
+	void storedContextIsRemovedFromExpandedSubscriptionForSafeCompaction() {
 		Map<String, Object> storedContext = Map.of("Device", "https://example.test/Device");
 		Map<String, Object> subscription = new HashMap<>();
 		subscription.put(NGSIConstants.JSON_LD_ID, "urn:ngsi-ld:Subscription:stored-context");
 		subscription.put(NGSIConstants.JSON_LD_CONTEXT, List.of(storedContext));
 
-		List<Object> responseContext = SubscriptionController.prepareResponseContextHeader(List.of(), subscription);
+		Object responseContext = SubscriptionController.removeStoredContext(subscription);
 
 		assertEquals(List.of(storedContext), responseContext);
 		assertFalse(subscription.containsKey(NGSIConstants.JSON_LD_CONTEXT));
 	}
 
 	@Test
-	void requestedContextWinsButStoredContextIsStillRemovedFromExpandedSubscription() {
-		String requestedContext = "https://example.test/requested-context.jsonld";
-		Map<String, Object> subscription = new HashMap<>();
-		subscription.put(NGSIConstants.JSON_LD_CONTEXT, Map.of("Device", "https://example.test/Device"));
-
-		List<Object> responseContext = SubscriptionController.prepareResponseContextHeader(
-				List.of(requestedContext), subscription);
-
-		assertEquals(List.of(requestedContext), responseContext);
-		assertFalse(subscription.containsKey(NGSIConstants.JSON_LD_CONTEXT));
+	void declaredContextUrlsExcludeResolvedInlineDefinitions() {
+		assertEquals(List.of("https://example.test/context.jsonld"),
+				SubscriptionController.getDeclaredContexts(
+						List.of("https://example.test/context.jsonld", Map.of("Device", "https://example.test/Device"))));
+		assertEquals(List.of(), SubscriptionController.getDeclaredContexts(null));
 	}
 }

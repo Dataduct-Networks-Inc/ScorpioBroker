@@ -102,6 +102,11 @@ public class SubscriptionController {
 		} catch (ResponseException e) {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, tenant));
 		}
+		List<String> declaredContexts = getDeclaredContexts(map.get(NGSIConstants.JSON_LD_CONTEXT));
+		if (declaredContexts.isEmpty()) {
+			declaredContexts = getDeclaredContexts(HttpUtils.getAtContext(request));
+		}
+		List<String> finalDeclaredContexts = declaredContexts;
 
 		return HttpUtils.expandBody(request, map, AppConstants.SUBSCRIPTION_CREATE_PAYLOAD, ldService).onItem()
 				.transformToUni(tuple -> {
@@ -112,6 +117,9 @@ public class SubscriptionController {
 						contextLink = Uni.createFrom().item(tuple.getItem1());
 					}
 					return contextLink.onItem().transformToUni(ctx -> {
+						if (!finalDeclaredContexts.isEmpty()) {
+							ctx.setOriginalAtContext(finalDeclaredContexts);
+						}
 						return subService
 								.createSubscription(otherHead, tenant, tuple.getItem2(),
 										ctx, viaHeaders)
@@ -225,29 +233,33 @@ public class SubscriptionController {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, HttpUtils.getTenant(request)));
 		}
 		return subService.getSubscription(tenant, subscriptionId).onItem().transformToUni(subscription -> {
-			List<Object> responseContextHeader = prepareResponseContextHeader(requestedContextHeader, subscription);
-			return ldService.parse(responseContextHeader).onItem().transformToUni(responseContext -> {
+			Object storedAtContext = removeStoredContext(subscription);
+			List<Object> compactionContextHeader = new ArrayList<>(requestedContextHeader);
+			return ldService.parse(compactionContextHeader).onItem().transformToUni(responseContext -> {
 				fixSub(subscription);
-				return HttpUtils.generateSubscriptionResult(responseContextHeader, responseContext, acceptHeader,
-						subscription, finalOptions, ldService, true);
+				Object responseAtContext = requestedContextHeader.isEmpty() ? storedAtContext : null;
+				return HttpUtils.generateSubscriptionResult(compactionContextHeader, responseContext, acceptHeader,
+						subscription, finalOptions, ldService, true, responseAtContext);
 			});
 		}).onFailure().recoverWithItem(e -> {
 			return HttpUtils.handleControllerExceptions(e, tenant);
 		});
 	}
 
-	static List<Object> prepareResponseContextHeader(List<Object> requestedContextHeader,
-			Map<String, Object> subscription) {
-		Object storedAtContext = subscription.remove(NGSIConstants.JSON_LD_CONTEXT);
-		List<Object> responseContextHeader = new ArrayList<>(requestedContextHeader);
-		if (responseContextHeader.isEmpty()) {
-			if (storedAtContext instanceof List<?> storedContexts) {
-				responseContextHeader.addAll(storedContexts);
-			} else if (storedAtContext != null) {
-				responseContextHeader.add(storedAtContext);
-			}
+	static Object removeStoredContext(Map<String, Object> subscription) {
+		return subscription.remove(NGSIConstants.JSON_LD_CONTEXT);
+	}
+
+	static List<String> getDeclaredContexts(Object contextValue) {
+		if (contextValue == null) {
+			return List.of();
 		}
-		return responseContextHeader;
+		List<?> contexts = contextValue instanceof List<?> list ? list : List.of(contextValue);
+		return contexts.stream()
+				.filter(String.class::isInstance)
+				.map(String.class::cast)
+				.filter(context -> !context.isBlank())
+				.toList();
 	}
 
 	@Path("/{id}")
@@ -296,18 +308,14 @@ public class SubscriptionController {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, tenant));
 		}
 
-		List<String> contexts;
-		Object ctxObj = map.get("@context");
-		if (ctxObj instanceof List) {
-			contexts = (List<String>) ctxObj;
-		} else if (ctxObj instanceof String s) {
-			contexts = Lists.newArrayList(s);
-		} else {
-			contexts = null;
+		List<String> contexts = getDeclaredContexts(map.get("@context"));
+		if (contexts.isEmpty()) {
+			contexts = getDeclaredContexts(HttpUtils.getAtContext(request));
 		}
+		List<String> declaredContexts = contexts;
 		List<String> finalContexts = new ArrayList<>();
-		if (contexts != null) {
-			for (String url : contexts) {
+		if (!declaredContexts.isEmpty()) {
+			for (String url : declaredContexts) {
 				url = url + "?type=implicitlyCreated";
 				finalContexts.add(url);
 			}
@@ -316,6 +324,9 @@ public class SubscriptionController {
 
 		return HttpUtils.expandBody(request, map, AppConstants.SUBSCRIPTION_UPDATE_PAYLOAD, ldService).onItem()
 				.transformToUni(tuple -> {
+					if (!declaredContexts.isEmpty()) {
+						tuple.getItem1().setOriginalAtContext(declaredContexts);
+					}
 					return subService
 							.updateSubscription(tenant, id, tuple.getItem2(), tuple.getItem1(),
 									viaHeaders)

@@ -548,6 +548,21 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 		return request.getSubscription().getTimeInterval() > 0;
 	}
 
+	static Map<String, Object> serializeContextForStorage(Context context) {
+		Map<String, Object> storedContext = new HashMap<>(context.serialize());
+		List<String> originalAtContext = context.getOriginalAtContext().stream()
+				.map(url -> url.endsWith("?type=implicitlyCreated")
+						? url.substring(0, url.length() - "?type=implicitlyCreated".length())
+						: url)
+				.filter(url -> !NGSIConstants.CORE_CONTEXT_URLS.contains(url))
+				.distinct()
+				.toList();
+		if (!originalAtContext.isEmpty()) {
+			storedContext.put(NGSIConstants.ORIGINAL_AT_CONTEXT, originalAtContext);
+		}
+		return storedContext;
+	}
+
 	public Uni<NGSILDOperationResult> createSubscription(HeadersMultiMap linkHead, String tenant,
 			Map<String, Object> subscription, Context contextLink, ViaHeaders viaHeaders) {
 		SubscriptionRequest request;
@@ -562,7 +577,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			return Uni.createFrom().failure(e);
 		}
 		SubscriptionTools.setInitTimesSentAndFailed(request);
-		Map<String, Object> tmp = request.getContext().serialize();
+		Map<String, Object> tmp = serializeContextForStorage(request.getContext());
 
 		return localContextService.createImplicitly(tenant, tmp).onItem().transformToUni(contextId -> {
 			String ctxUrl = microServiceUtils.getGatewayString() + NGSIConstants.JSONLD_CONTEXTS + contextId;
@@ -720,7 +735,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	public Uni<NGSILDOperationResult> updateSubscription(String tenant, String subscriptionId,
 			Map<String, Object> update, Context context, ViaHeaders viaHeaders) {
 		UpdateSubscriptionRequest request = new UpdateSubscriptionRequest(tenant, subscriptionId, update, context);
-		return localContextService.createImplicitly(tenant, request.getContext().serialize()).onItem()
+		return localContextService.createImplicitly(tenant, serializeContextForStorage(request.getContext())).onItem()
 				.transformToUni(contextId -> {
 					request.setContextId(contextId);
 					return subDAO.updateSubscription(request, contextId).onItem().transformToUni(tup -> {
@@ -862,13 +877,13 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			Row row = rows.iterator().next();
 			JsonObject contextBody = row.getJsonObject(1);
 			String contextId = row.getString(2);
-			if (contextId == null || contextBody == null
-					|| contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT) == null) {
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
 				recordInvalidSubscription(tenant, subscriptionId, "missing_context", null);
 				return Uni.createFrom().failure(new ResponseException(ErrorType.SubscriptionContextMissing,
 						"Subscription " + subscriptionId + " has no context in tenant " + tenant));
 			}
-			Object storedAtContext = contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT);
 			return ldService.parsePure(storedAtContext).onItem().transformToUni(storedContext -> {
 				SubscriptionRequest loadedRequest = getLoadedSubscription(tenant, subscriptionId);
 				if (loadedRequest == null) {
@@ -876,8 +891,10 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 							"Subscription " + subscriptionId + " is stored but not loaded for tenant " + tenant));
 				}
 				Map<String, Object> rowData = row.getJsonObject(0).getMap();
-				rowData.put(NGSIConstants.JSON_LD_CONTEXT,
-						storedContext.serialize().get(NGSIConstants.JSON_LD_CONTEXT));
+				Object originalAtContext = contextBody.getMap().get(NGSIConstants.ORIGINAL_AT_CONTEXT);
+				rowData.put(NGSIConstants.JSON_LD_CONTEXT, originalAtContext == null
+						? storedContext.serialize().get(NGSIConstants.JSON_LD_CONTEXT)
+						: originalAtContext);
 				rowData.put(NGSIConstants.STATUS, loadedRequest.getSubscription().getStatus());
 				return Uni.createFrom().item(rowData);
 			}).onFailure().transform(failure -> {
@@ -1915,13 +1932,14 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			Row first = rows.iterator().next();
 			JsonObject contextBody = first.getJsonObject(1);
 			String contextId = first.getString(2);
-			if (contextId == null || contextBody == null
-					|| contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT) == null) {
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
 				removeLoadedSubscription(tenant, subId);
 				recordInvalidSubscription(tenant, subId, "missing_context", null);
 				return Uni.createFrom().voidItem();
 			}
-			return ldService.parsePure(contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT)).onItem().transformToUni(ctx -> {
+			return ldService.parsePure(storedAtContext).onItem().transformToUni(ctx -> {
 				SubscriptionRequest request;
 				try {
 					request = new SubscriptionRequest(tenant, first.getJsonObject(0).getMap(), ctx);
