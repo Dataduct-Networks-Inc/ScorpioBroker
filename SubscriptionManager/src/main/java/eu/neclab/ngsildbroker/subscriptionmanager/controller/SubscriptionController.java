@@ -225,29 +225,21 @@ public class SubscriptionController {
 			return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, HttpUtils.getTenant(request)));
 		}
 		return subService.getSubscription(tenant, subscriptionId).onItem().transformToUni(subscription -> {
-			List<Object> responseContextHeader = prepareResponseContextHeader(requestedContextHeader, subscription);
-			return ldService.parse(responseContextHeader).onItem().transformToUni(responseContext -> {
+			Object storedAtContext = removeStoredContext(subscription);
+			List<Object> compactionContextHeader = new ArrayList<>(requestedContextHeader);
+			return ldService.parse(compactionContextHeader).onItem().transformToUni(responseContext -> {
 				fixSub(subscription);
-				return HttpUtils.generateSubscriptionResult(responseContextHeader, responseContext, acceptHeader,
-						subscription, finalOptions, ldService, true);
+				Object responseAtContext = requestedContextHeader.isEmpty() ? storedAtContext : null;
+				return HttpUtils.generateSubscriptionResult(compactionContextHeader, responseContext, acceptHeader,
+						subscription, finalOptions, ldService, true, responseAtContext);
 			});
 		}).onFailure().recoverWithItem(e -> {
 			return HttpUtils.handleControllerExceptions(e, tenant);
 		});
 	}
 
-	static List<Object> prepareResponseContextHeader(List<Object> requestedContextHeader,
-			Map<String, Object> subscription) {
-		Object storedAtContext = subscription.remove(NGSIConstants.JSON_LD_CONTEXT);
-		List<Object> responseContextHeader = new ArrayList<>(requestedContextHeader);
-		if (responseContextHeader.isEmpty()) {
-			if (storedAtContext instanceof List<?> storedContexts) {
-				responseContextHeader.addAll(storedContexts);
-			} else if (storedAtContext != null) {
-				responseContextHeader.add(storedAtContext);
-			}
-		}
-		return responseContextHeader;
+	static Object removeStoredContext(Map<String, Object> subscription) {
+		return subscription.remove(NGSIConstants.JSON_LD_CONTEXT);
 	}
 
 	@Path("/{id}")
