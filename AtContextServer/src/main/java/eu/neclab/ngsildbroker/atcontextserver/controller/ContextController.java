@@ -173,7 +173,8 @@ public class ContextController {
 	@Timed(name = "context_createimplicitly_duration", description = "Duration of context createimplicitly requests", unit = MetricUnits.MILLISECONDS, absolute = true)
 	@ConcurrentGauge(name = "context_createimplicitly_concurrent", description = "Number of concurrent context createimplicitly requests", absolute = true)
 	public Uni<RestResponse<Object>> createImplicitly(HttpServerRequest request, String payload) {
-		String tenant = HttpUtils.getTenant(request);
+		String headerTenant = HttpUtils.getTenant(request);
+		String tenant = headerTenant.isBlank() ? AppConstants.INTERNAL_NULL_KEY : headerTenant;
 		return JsonUtils.fromString(payload).onItem().transformToUni(json -> {
 			Map<String, Object> payloadMap = new HashMap<>();
 			try {

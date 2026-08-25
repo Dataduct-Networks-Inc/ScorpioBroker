@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -12,6 +13,7 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 
@@ -27,12 +29,16 @@ import org.mockito.MockitoAnnotations;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.jsonldjava.core.Context;
+import com.github.jsonldjava.core.JsonLDService;
+import com.google.common.collect.Table;
 
+import eu.neclab.ngsildbroker.commons.datatypes.Subscription;
 import eu.neclab.ngsildbroker.commons.datatypes.requests.subscription.DeleteSubscriptionRequest;
 import eu.neclab.ngsildbroker.commons.datatypes.requests.subscription.SubscriptionRequest;
 import eu.neclab.ngsildbroker.commons.datatypes.results.NGSILDOperationResult;
 import eu.neclab.ngsildbroker.commons.datatypes.results.QueryResult;
 import eu.neclab.ngsildbroker.commons.exceptions.ResponseException;
+import eu.neclab.ngsildbroker.commons.tools.MicroServiceUtils;
 import eu.neclab.ngsildbroker.subscriptionmanager.controller.CustomProfile;
 import eu.neclab.ngsildbroker.subscriptionmanager.repository.SubscriptionInfoDAO;
 import io.quarkus.test.junit.QuarkusTest;
@@ -61,6 +67,9 @@ public class SubscriptionServiceTest {
 	Context context;
 
 	@Mock
+	JsonLDService ldService;
+
+	@Mock
 	MutinyEmitter<SubscriptionRequest> internalSubEmitter;
 
 	@Mock
@@ -68,6 +77,9 @@ public class SubscriptionServiceTest {
 
 	@Mock
 	LocalContextService localContextService;
+
+	@Mock
+	MicroServiceUtils microServiceUtils;
 
 	String subscriptionId = "urn:ngsi-ld:Subscription:1";
 	String notificationId = "urn:ngsi-ld:notify:1";
@@ -88,6 +100,10 @@ public class SubscriptionServiceTest {
 				+ "[{\"@value\":\"keyValues\"}]}],\"@type\":[\"https://uri.etsi.org/ngsi-ld/Subscription\"]}";
 		ObjectMapper objectMapper = new ObjectMapper();
 		resolved = objectMapper.readValue(jsonLdObject, Map.class);
+		when(context.serialize()).thenReturn(Map.of("@context", "https://example.test/context.jsonld"));
+		when(localContextService.createImplicitly(eq(tenant), any()))
+				.thenReturn(Uni.createFrom().item("urn:context"));
+		when(microServiceUtils.getGatewayString()).thenReturn("http://localhost:9090");
 
 	}
 
@@ -108,6 +124,7 @@ public class SubscriptionServiceTest {
 		assertEquals(1, result.getSuccesses().size());
 		assertEquals(0, result.getFailures().size());
 		verify(subDAO, times(1)).createSubscription(any(), any());
+		verify(localContextService).createImplicitly(eq(tenant), any());
 
 	}
 
@@ -126,6 +143,22 @@ public class SubscriptionServiceTest {
 		assertEquals("Subscription with id " + subscriptionId + " exists", responseException.getDetail());
 		verify(subDAO, times(1)).createSubscription(any(), any());
 
+	}
+
+	@Test
+	public void createSubscriptionIntegrityViolationIsSanitized() {
+		PgException sqlException = new PgException("foreign key details must not escape", "", "23503", "");
+		when(subDAO.createSubscription(any(), any())).thenReturn(Uni.createFrom().failure(sqlException));
+
+		Uni<NGSILDOperationResult> uniResult = subscriptionService.createSubscription(link, tenant, resolved, context,
+				null);
+
+		Throwable throwable = assertThrows(CompletionException.class, () -> uniResult.await().indefinitely());
+		ResponseException responseException = (ResponseException) throwable.getCause();
+
+		assertEquals(500, responseException.getErrorCode());
+		assertEquals("urn:norda:scorpio:error:subscription-persistence-invariant",
+				responseException.getJson().get("type"));
 	}
 
 	@SuppressWarnings("unchecked")
@@ -151,7 +184,24 @@ public class SubscriptionServiceTest {
 		assertEquals(404, responseException.getErrorCode());
 		assertEquals("subscription not found", responseException.getDetail());
 		verify(subDAO, times(1)).updateSubscription(any(), any());
+		verify(localContextService).createImplicitly(eq(tenant), any());
 
+	}
+
+	@Test
+	public void updateSubscriptionIntegrityViolationIsSanitized() {
+		PgException sqlException = new PgException("check constraint details must not escape", "", "23514", "");
+		when(subDAO.updateSubscription(any(), any())).thenReturn(Uni.createFrom().failure(sqlException));
+
+		Uni<NGSILDOperationResult> uniResult = subscriptionService.updateSubscription(tenant, subscriptionId, resolved,
+				context, null);
+
+		Throwable throwable = assertThrows(CompletionException.class, () -> uniResult.await().indefinitely());
+		ResponseException responseException = (ResponseException) throwable.getCause();
+
+		assertEquals(500, responseException.getErrorCode());
+		assertEquals("urn:norda:scorpio:error:subscription-persistence-invariant",
+				responseException.getJson().get("type"));
 	}
 
 	@SuppressWarnings("unchecked")
@@ -174,7 +224,7 @@ public class SubscriptionServiceTest {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	public void getSubscriptionTest() {
+	public void getSubscriptionTest() throws Exception {
 
 		Row rowMock = mock(Row.class);
 		RowSet<Row> rowSetMock = mock(RowSet.class);
@@ -184,7 +234,21 @@ public class SubscriptionServiceTest {
 		when(rowIteratorMock.next()).thenReturn(rowMock);
 		JsonObject jsonObject = new JsonObject();
 		jsonObject.put("@id", subscriptionId);
-		when(rowMock.getJsonObject(anyInt())).thenReturn(jsonObject);
+		JsonObject contextBody = new JsonObject().put("@context", "https://example.test/context.jsonld");
+		when(rowMock.getJsonObject(0)).thenReturn(jsonObject);
+		when(rowMock.getJsonObject(1)).thenReturn(contextBody);
+		when(rowMock.getString(2)).thenReturn("urn:context");
+		when(ldService.parsePure(any())).thenReturn(Uni.createFrom().item(context));
+		when(context.serialize()).thenReturn(Map.of("@context", "https://example.test/context.jsonld"));
+		Subscription loadedSubscription = mock(Subscription.class);
+		when(loadedSubscription.getStatus()).thenReturn("active");
+		SubscriptionRequest loadedRequest = mock(SubscriptionRequest.class);
+		when(loadedRequest.getSubscription()).thenReturn(loadedSubscription);
+		Field tableField = SubscriptionService.class.getDeclaredField("tenant2subscriptionId2Subscription");
+		tableField.setAccessible(true);
+		Table<String, String, SubscriptionRequest> table =
+				(Table<String, String, SubscriptionRequest>) tableField.get(subscriptionService);
+		table.put(tenant, subscriptionId, loadedRequest);
 		Uni<RowSet<Row>> uniRowsetMock = Uni.createFrom().item(rowSetMock);
 		when(subDAO.getSubscription(any(), any())).thenReturn(uniRowsetMock);
 
@@ -230,6 +294,7 @@ public class SubscriptionServiceTest {
 		JsonObject jsonObject = new JsonObject();
 		jsonObject.put("@id", subscriptionId);
 		when(rowMock.getJsonObject(anyInt())).thenReturn(jsonObject);
+		when(rowMock.getLong(1)).thenReturn(1L);
 		Uni<RowSet<Row>> uniRowsetMock = Uni.createFrom().item(rowSetMock);
 		when(subDAO.getAllSubscriptions(any(), anyInt(), anyInt())).thenReturn(uniRowsetMock);
 
@@ -266,9 +331,9 @@ public class SubscriptionServiceTest {
 	@Test
 	public void remoteNotifyTest() throws Exception {
 
-		Field field = SubscriptionService.class.getDeclaredField("remoteNotifyCallbackId2InternalSub");
+		Field field = SubscriptionService.class.getDeclaredField("remoteNotifyCallbackId2SubRequest");
 		field.setAccessible(true);
-		field.set(subscriptionService, new HashMap<String, SubscriptionRequest>());
+		field.set(subscriptionService, new HashMap<String, List<SubscriptionRequest>>());
 
 		Uni<Void> resultUni = subscriptionService.remoteNotify(notificationId, resolved, context);
 		resultUni.await().indefinitely();

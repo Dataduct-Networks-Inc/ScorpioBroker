@@ -188,7 +188,7 @@ void startup() {
 			sb.append(Integer.toHexString((b & 0xFF) | 0x100), 1, 3);
 		}
 		String id = "urn:" + sb;
-		String sql = "INSERT INTO contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') returning id";
+		String sql = "INSERT INTO public.contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') returning id";
 		return connectionManager.executeQuery(tenant, sql, Tuple.of(id, new JsonObject(payload)), true).onItemOrFailure()
 				.transform((rows, failure) -> {
 					if (failure != null) {
