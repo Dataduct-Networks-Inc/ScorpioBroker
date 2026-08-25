@@ -25,4 +25,12 @@ class SubscriptionControllerStoredContextTest {
 		assertEquals(List.of(storedContext), responseContext);
 		assertFalse(subscription.containsKey(NGSIConstants.JSON_LD_CONTEXT));
 	}
+
+	@Test
+	void declaredContextUrlsExcludeResolvedInlineDefinitions() {
+		assertEquals(List.of("https://example.test/context.jsonld"),
+				SubscriptionController.getDeclaredContexts(
+						List.of("https://example.test/context.jsonld", Map.of("Device", "https://example.test/Device"))));
+		assertEquals(List.of(), SubscriptionController.getDeclaredContexts(null));
+	}
 }
