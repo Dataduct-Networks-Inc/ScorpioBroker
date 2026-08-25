@@ -200,7 +200,7 @@ public class SubscriptionInfoDAO {
 	}
 
 	public Uni<RowSet<Row>> getAllSubscriptions(String tenant, int limit, int offset) {
-		String sql = "SELECT subscription, count(*) over() FROM subscriptions LIMIT $1 OFFSET $2";
+		String sql = "SELECT subscriptions.subscription, count(*) over() FROM subscriptions JOIN contexts ON subscriptions.context = contexts.id LIMIT $1 OFFSET $2";
 		Tuple tuple = Tuple.of(limit, offset);
 		return connectionManager.executeQuery(tenant, sql, tuple, false);
 	}
@@ -285,7 +285,9 @@ public class SubscriptionInfoDAO {
 	}
 
 	public Uni<Tuple3<Map<String, Object>, String, Map<String, Object>>> loadSubscription(String tenant, String id) {
-		return connectionManager.executeQuery(tenant, "select tenant_id from tenant", Tuple.of(id), false).onItem()
+		return connectionManager.executeQuery(tenant,
+				"SELECT subscriptions.subscription, subscriptions.context, contexts.body FROM subscriptions LEFT JOIN contexts ON subscriptions.context = contexts.id WHERE subscription_id=$1",
+				Tuple.of(id), false).onItem()
 				.transform(rows -> {
 					if (rows.size() == 0) {
 						Tuple3<Map<String, Object>, String, Map<String, Object>> r = Tuple3.of(null, null, null);

@@ -175,7 +175,7 @@ void startup() {
 
 	}
 
-	public Uni<RestResponse<Object>> createContextImpl(Map<String, Object> payload) {
+	public Uni<RestResponse<Object>> createContextImpl(String tenant, Map<String, Object> payload) {
 		java.security.MessageDigest md;
 		try {
 			md = java.security.MessageDigest.getInstance("MD5");
@@ -189,7 +189,7 @@ void startup() {
 		}
 		String id = "urn:" + sb;
 		String sql = "INSERT INTO public.contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') returning id";
-		return connectionManager.executeQuery(null, sql, Tuple.of(id, new JsonObject(payload)), false).onItemOrFailure()
+		return connectionManager.executeQuery(tenant, sql, Tuple.of(id, new JsonObject(payload)), true).onItemOrFailure()
 				.transform((rows, failure) -> {
 					if (failure != null) {
 						if (failure instanceof PgException
