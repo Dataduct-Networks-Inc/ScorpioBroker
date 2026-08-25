@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -171,7 +172,9 @@ public class ContextController {
 	@Counted(name = "context_createimplicitly_total", description = "Total number of context createimplicitly requests", absolute = true)
 	@Timed(name = "context_createimplicitly_duration", description = "Duration of context createimplicitly requests", unit = MetricUnits.MILLISECONDS, absolute = true)
 	@ConcurrentGauge(name = "context_createimplicitly_concurrent", description = "Number of concurrent context createimplicitly requests", absolute = true)
-	public Uni<RestResponse<Object>> createImplicitly(String payload) {
+	public Uni<RestResponse<Object>> createImplicitly(
+			@HeaderParam(NGSIConstants.TENANT_HEADER) String tenant, String payload) {
+		String resolvedTenant = tenant == null || tenant.isBlank() ? AppConstants.INTERNAL_NULL_KEY : tenant;
 		return JsonUtils.fromString(payload).onItem().transformToUni(json -> {
 			Map<String, Object> payloadMap = new HashMap<>();
 			try {
@@ -183,7 +186,7 @@ public class ContextController {
 			} catch (Exception e) {
 				return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, AppConstants.INTERNAL_NULL_KEY));
 			}
-			return contextService.createImplicitly(payloadMap);
+			return contextService.createImplicitly(resolvedTenant, payloadMap);
 		});
 	}
 }
