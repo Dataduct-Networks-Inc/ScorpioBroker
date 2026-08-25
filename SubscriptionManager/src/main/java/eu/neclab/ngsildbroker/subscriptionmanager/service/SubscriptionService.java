@@ -862,13 +862,13 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			Row row = rows.iterator().next();
 			JsonObject contextBody = row.getJsonObject(1);
 			String contextId = row.getString(2);
-			if (contextId == null || contextBody == null
-					|| contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT) == null) {
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
 				recordInvalidSubscription(tenant, subscriptionId, "missing_context", null);
 				return Uni.createFrom().failure(new ResponseException(ErrorType.SubscriptionContextMissing,
 						"Subscription " + subscriptionId + " has no context in tenant " + tenant));
 			}
-			Object storedAtContext = contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT);
 			return ldService.parsePure(storedAtContext).onItem().transformToUni(storedContext -> {
 				SubscriptionRequest loadedRequest = getLoadedSubscription(tenant, subscriptionId);
 				if (loadedRequest == null) {
@@ -1915,13 +1915,14 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			Row first = rows.iterator().next();
 			JsonObject contextBody = first.getJsonObject(1);
 			String contextId = first.getString(2);
-			if (contextId == null || contextBody == null
-					|| contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT) == null) {
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
 				removeLoadedSubscription(tenant, subId);
 				recordInvalidSubscription(tenant, subId, "missing_context", null);
 				return Uni.createFrom().voidItem();
 			}
-			return ldService.parsePure(contextBody.getValue(NGSIConstants.JSON_LD_CONTEXT)).onItem().transformToUni(ctx -> {
+			return ldService.parsePure(storedAtContext).onItem().transformToUni(ctx -> {
 				SubscriptionRequest request;
 				try {
 					request = new SubscriptionRequest(tenant, first.getJsonObject(0).getMap(), ctx);

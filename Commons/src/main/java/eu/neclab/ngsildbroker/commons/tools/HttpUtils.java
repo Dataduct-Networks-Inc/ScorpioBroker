@@ -560,16 +560,32 @@ public final class HttpUtils {
 	public static Uni<RestResponse<Object>> generateSubscriptionResult(List<Object> contextHeader, Context context,
 			int acceptHeader, Object entity, Set<String> options,
 			JsonLDService ldService, boolean addAtContext) {
+		return generateSubscriptionResult(contextHeader, context, acceptHeader, entity, options, ldService,
+				addAtContext, null);
+	}
+
+	public static Uni<RestResponse<Object>> generateSubscriptionResult(List<Object> contextHeader, Context context,
+			int acceptHeader, Object entity, Set<String> options,
+			JsonLDService ldService, boolean addAtContext, Object responseAtContext) {
 		return generateResult(contextHeader, context, acceptHeader, entity, null, options, null,
-				ldService, null, null, false, addAtContext, AppConstants.SUBSCRIPTION_CREATE_PAYLOAD);
+				ldService, null, null, false, addAtContext, AppConstants.SUBSCRIPTION_CREATE_PAYLOAD,
+				responseAtContext);
 	}
 
 	public static Uni<RestResponse<Object>> generateResult(List<Object> contextHeader, Context context,
 			int acceptHeader, Object entity, String geometryProperty, Set<String> options, LanguageQueryTerm langQuery,
 			JsonLDService ldService, List<String> omitList, List<String> pickList, boolean forceList,
 			boolean addAtContext, int payloadType) {
+		return generateResult(contextHeader, context, acceptHeader, entity, geometryProperty, options, langQuery,
+				ldService, omitList, pickList, forceList, addAtContext, payloadType, null);
+	}
+
+	private static Uni<RestResponse<Object>> generateResult(List<Object> contextHeader, Context context,
+			int acceptHeader, Object entity, String geometryProperty, Set<String> options, LanguageQueryTerm langQuery,
+			JsonLDService ldService, List<String> omitList, List<String> pickList, boolean forceList,
+			boolean addAtContext, int payloadType, Object responseAtContext) {
 		return generateCompactedResult(contextHeader, context, acceptHeader, entity, geometryProperty, options,
-				langQuery, false, false, ldService, addAtContext, payloadType).onItem()
+				langQuery, false, false, ldService, addAtContext, payloadType, responseAtContext).onItem()
 				.transform(resultBodyAndHeaders -> {
 					ResponseBuilder<Object> resp = RestResponseBuilderImpl.ok();
 					List<Tuple2<String, String>> headers = resultBodyAndHeaders.getItem2();
@@ -618,6 +634,14 @@ public final class HttpUtils {
 			Context context, int acceptHeader, Object entity, String geometryProperty, Set<String> options,
 			LanguageQueryTerm langQuery, boolean forceArray, boolean forceAttributeList, JsonLDService ldService,
 			boolean addAtContext, int payloadType) {
+		return generateCompactedResult(contextHeader, context, acceptHeader, entity, geometryProperty, options,
+				langQuery, forceArray, forceAttributeList, ldService, addAtContext, payloadType, null);
+	}
+
+	private static Uni<Tuple2<Object, List<Tuple2<String, String>>>> generateCompactedResult(
+			List<Object> contextHeader, Context context, int acceptHeader, Object entity, String geometryProperty,
+			Set<String> options, LanguageQueryTerm langQuery, boolean forceArray, boolean forceAttributeList,
+			JsonLDService ldService, boolean addAtContext, int payloadType, Object responseAtContext) {
 
 		Uni<Tuple3<String, String, List<Tuple2<String, String>>>> uni;
 		switch (acceptHeader) {
@@ -671,7 +695,9 @@ public final class HttpUtils {
 							Object finalCompacted;
 							if (compacted.containsKey(JsonLdConsts.GRAPH)) {
 								finalCompacted = compacted.get(JsonLdConsts.GRAPH);
-								Object bodyContext = compacted.get(NGSIConstants.JSON_LD_CONTEXT);
+								Object bodyContext = responseAtContext == null
+										? compacted.get(NGSIConstants.JSON_LD_CONTEXT)
+										: responseAtContext;
 								if (finalCompacted instanceof List) {
 									List<Map<String, Object>> tmpList = (List<Map<String, Object>>) finalCompacted;
 									for (Map<String, Object> entry : tmpList) {
@@ -683,6 +709,10 @@ public final class HttpUtils {
 								}
 							} else {
 								finalCompacted = compacted;
+								if (responseAtContext != null && finalCompacted instanceof Map) {
+									((Map<String, Object>) finalCompacted).put(NGSIConstants.JSON_LD_CONTEXT,
+											responseAtContext);
+								}
 							}
 							if (options != null && options.contains(NGSIConstants.QUERY_PARAMETER_CONCISE_VALUE)) {
 								makeConcise(finalCompacted);
