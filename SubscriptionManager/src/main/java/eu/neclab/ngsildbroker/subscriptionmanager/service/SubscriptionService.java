@@ -1337,7 +1337,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 
 	}
 
-	private Uni<Void> sendNotification(SubscriptionRequest potentialSub, List<Map<String, Object>> dataToSend) {
+	Uni<Void> sendNotification(SubscriptionRequest potentialSub, List<Map<String, Object>> dataToSend) {
 		if (dataToSend == null || dataToSend.isEmpty()) {
 			return Uni.createFrom().voidItem();
 		}
@@ -1470,8 +1470,29 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 						}
 					}
 					return toSend;
-				});
+				}).onFailure().recoverWithUni(failure -> recordNotificationFailure(potentialSub, failure));
 
+	}
+
+	/**
+	 * A notification that cannot be built (its subscription's context does not resolve, for
+	 * one) fails this subscription only. The notifications of every subscription matching
+	 * the same change are combined with Uni.combine().all(), which cancels the others on the
+	 * first failure: one broken subscription silently starved the healthy ones. Count the
+	 * failure where an operator can see it (timesFailed, lastFailure) instead.
+	 */
+	Uni<Void> recordNotificationFailure(SubscriptionRequest potentialSub, Throwable failure) {
+		logger.error("failed to generate notification for subscription " + potentialSub.getId(), failure);
+		long now = System.currentTimeMillis();
+		potentialSub.getSubscription().getNotification().setLastFailedNotification(now);
+		potentialSub.getSubscription().getNotification().setLastNotification(now);
+		return subDAO
+				.updateNotificationFailure(potentialSub.getTenant(), potentialSub.getId(),
+						SerializationTools.notifiedAt_formatter
+								.format(LocalDateTime.ofInstant(Instant.ofEpochMilli(now), ZoneId.of("Z"))))
+				.onFailure().invoke(e -> logger.error("could not record the notification failure of subscription "
+						+ potentialSub.getId(), e))
+				.onFailure().recoverWithNull().replaceWithVoid();
 	}
 
 	private boolean notificationTriggerCheck(Subscription subscription, int triggerReason) {
