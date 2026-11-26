@@ -30,7 +30,9 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.QueryParam;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -173,15 +175,25 @@ public class ContextController {
 	@Timed(name = "context_createimplicitly_duration", description = "Duration of context createimplicitly requests", unit = MetricUnits.MILLISECONDS, absolute = true)
 	@ConcurrentGauge(name = "context_createimplicitly_concurrent", description = "Number of concurrent context createimplicitly requests", absolute = true)
 	public Uni<RestResponse<Object>> createImplicitly(HttpServerRequest request, String payload) {
-		String tenant = HttpUtils.getTenant(request);
+		String headerTenant = HttpUtils.getTenant(request);
+		String tenant = headerTenant.isBlank() ? AppConstants.INTERNAL_NULL_KEY : headerTenant;
 		return JsonUtils.fromString(payload).onItem().transformToUni(json -> {
 			Map<String, Object> payloadMap = new HashMap<>();
 			try {
-				Map<String, Object> contextBody = (Map<String, Object>) ((Map<String, Object>) json).get("@context");
+				Map<String, Object> requestBody = (Map<String, Object>) json;
+				Map<String, Object> contextBody = (Map<String, Object>) requestBody.get("@context");
 				if (contextBody == null)
 					throw new Exception("Bad Request");
 				else
 					payloadMap.put(NGSIConstants.JSON_LD_CONTEXT, contextBody);
+				Object originalAtContext = requestBody.get(NGSIConstants.ORIGINAL_AT_CONTEXT);
+				if (originalAtContext != null) {
+					if (!(originalAtContext instanceof List<?> originalContexts)
+							|| originalContexts.stream().anyMatch(context -> !(context instanceof String))) {
+						throw new Exception("Bad Request");
+					}
+					payloadMap.put(NGSIConstants.ORIGINAL_AT_CONTEXT, new ArrayList<>(originalContexts));
+				}
 			} catch (Exception e) {
 				return Uni.createFrom().item(HttpUtils.handleControllerExceptions(e, tenant));
 			}

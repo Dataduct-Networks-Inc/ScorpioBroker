@@ -10,6 +10,7 @@ import org.eclipse.microprofile.reactive.messaging.Acknowledgment.Strategy;
 import eu.neclab.ngsildbroker.commons.constants.AppConstants;
 import io.quarkus.arc.profile.IfBuildProfile;
 import io.smallrye.mutiny.Uni;
+import io.smallrye.reactive.messaging.annotations.Blocking;
 
 @ApplicationScoped
 @Startup
@@ -18,12 +19,14 @@ public class SubscriptionMessagingString extends SubscriptionMessagingBase {
 
 	@Incoming(AppConstants.ENTITY_RETRIEVE_CHANNEL)
 	@Acknowledgment(Strategy.PRE_PROCESSING)
+	@Blocking
 	public Uni<Void> handleEntity(String byteMessage) {
 		return handleEntityRaw(byteMessage);
 	}
 	
 	@Incoming(AppConstants.REGISTRY_RETRIEVE_CHANNEL)
 	@Acknowledgment(Strategy.PRE_PROCESSING)
+	@Blocking
 	public Uni<Void> handleCsource(String byteMessage) {
 		return handleCsourceRaw(byteMessage);
 	}

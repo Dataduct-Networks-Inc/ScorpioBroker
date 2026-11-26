@@ -21,6 +21,10 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.eclipse.microprofile.metrics.MetricRegistry;
+import org.eclipse.microprofile.metrics.MetricUnits;
+import org.eclipse.microprofile.metrics.Tag;
+import org.eclipse.microprofile.metrics.annotation.Gauge;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -126,6 +130,9 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	@Inject
 	MicroServiceUtils microServiceUtils;
 
+	@Inject
+	MetricRegistry metricRegistry;
+
 	@ConfigProperty(name = "scorpio.alltypesub.type")
 	private String allTypeSubType;
 
@@ -144,7 +151,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	private Table<String, String, SubscriptionRequest> tenant2subscriptionId2Subscription = HashBasedTable.create();
 	private Table<String, String, SubscriptionRequest> tenant2subscriptionId2IntervalSubscription = HashBasedTable
 			.create();
-	private Map<String, SubscriptionRequest> subscriptionId2RequestGlobal = Maps.newConcurrentMap();
+	private Map<String, String> invalidSubscriptionReasons = Maps.newConcurrentMap();
 	private Map<String, List<SubscriptionRequest>> remoteNotifyCallbackId2SubRequest = Maps.newConcurrentMap();
 	private Map<SubscriptionRemoteHost, String> subRemoteRequest2RemoteNotifyCallbackId = Maps.newConcurrentMap();
 	private Map<String, Set<SubscriptionRemoteHost>> cId2RemoteHost = Maps.newConcurrentMap();
@@ -155,6 +162,94 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	private SyncService subscriptionSyncService = null;
 
 	private final Object tableLock = new Object();
+
+	private String subscriptionKey(String tenant, String subscriptionId) {
+		return tenant + '\u0000' + subscriptionId;
+	}
+
+	private SubscriptionRequest getLoadedSubscription(String tenant, String subscriptionId) {
+		synchronized (tableLock) {
+			SubscriptionRequest request = tenant2subscriptionId2Subscription.get(tenant, subscriptionId);
+			if (request == null) {
+				request = tenant2subscriptionId2IntervalSubscription.get(tenant, subscriptionId);
+			}
+			return request;
+		}
+	}
+
+	private void storeLoadedSubscription(SubscriptionRequest request) {
+		synchronized (tableLock) {
+			if (isIntervalSub(request)) {
+				tenant2subscriptionId2IntervalSubscription.put(request.getTenant(), request.getId(), request);
+				tenant2subscriptionId2Subscription.remove(request.getTenant(), request.getId());
+			} else {
+				tenant2subscriptionId2Subscription.put(request.getTenant(), request.getId(), request);
+				tenant2subscriptionId2IntervalSubscription.remove(request.getTenant(), request.getId());
+			}
+		}
+		invalidSubscriptionReasons.remove(subscriptionKey(request.getTenant(), request.getId()));
+	}
+
+	private void removeLoadedSubscription(String tenant, String subscriptionId) {
+		synchronized (tableLock) {
+			tenant2subscriptionId2IntervalSubscription.remove(tenant, subscriptionId);
+			tenant2subscriptionId2Subscription.remove(tenant, subscriptionId);
+		}
+		invalidSubscriptionReasons.remove(subscriptionKey(tenant, subscriptionId));
+	}
+
+	private void recordInvalidSubscription(String tenant, String subscriptionId, String reason, Throwable failure) {
+		String key = subscriptionKey(tenant, subscriptionId);
+		if (invalidSubscriptionReasons.put(key, reason) == null && metricRegistry != null) {
+			metricRegistry.counter("scorpio_subscription_load_skipped_total", new Tag("reason", reason)).inc();
+		}
+		if (failure == null) {
+			logger.error("subscription_load_skipped tenant={} subscriptionId={} reason={}", tenant, subscriptionId,
+					reason);
+		} else {
+			logger.error("subscription_load_skipped tenant={} subscriptionId={} reason={}", tenant, subscriptionId,
+					reason, failure);
+		}
+	}
+
+	private void recordPersistenceInvariantFailure(String operation) {
+		if (metricRegistry != null) {
+			metricRegistry.counter("scorpio_subscription_persistence_invariant_failures_total",
+					new Tag("operation", operation)).inc();
+		}
+	}
+
+	private boolean isPersistenceInvariantViolation(Throwable failure) {
+		PgException pge = findPgException(failure);
+		return pge != null && ("23503".equals(pge.getSqlState()) || "23514".equals(pge.getSqlState()));
+	}
+
+	private PgException findPgException(Throwable failure) {
+		Throwable current = failure;
+		while (current != null) {
+			if (current instanceof PgException pge) {
+				return pge;
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+			current = current.getCause();
+		}
+		return null;
+	}
+
+	private ResponseException persistenceInvariantError(String tenant, String subscriptionId, String operation) {
+		recordPersistenceInvariantFailure(operation);
+		return new ResponseException(ErrorType.SubscriptionPersistenceInvariant,
+				"Subscription " + subscriptionId + " could not be " + operation + " for tenant " + tenant
+						+ " because its context is not stored in the same tenant database");
+	}
+
+	@Gauge(name = "scorpio_subscription_invalid_current", unit = MetricUnits.NONE,
+			description = "Current number of stored subscriptions skipped because they are invalid", absolute = true)
+	public long getInvalidSubscriptionCount() {
+		return invalidSubscriptionReasons.size();
+	}
 
 	public Uni<Void> handleRegistryChange(CSourceBaseRequest req) {
 		return RegistrationEntry.fromRegPayload(req.getPayload(), ldService).onItem().transformToUni(regs -> {
@@ -373,58 +468,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	void startup() {
 		this.webClient = WebClient.create(vertx);
 		ALL_TYPES_SUB = NGSIConstants.NGSI_LD_DEFAULT_PREFIX + allTypeSubType;
-		Uni<Void> loadSubs = subDAO.loadSubscriptions().onItem().transformToUni(subs -> {
-			List<Uni<Tuple4<String, Map<String, Object>, String, Context>>> unis = Lists.newArrayList();
-			subs.forEach(tuple -> {
-				if (tuple.getItem4() == null) {
-					logger.error("Skipping subscription {} on tenant {} - context {} not found in tenant database",
-							tuple.getItem2().get(NGSIConstants.JSON_LD_ID), tuple.getItem1(), tuple.getItem3());
-					return;
-				}
-				unis.add(ldService.parsePure(tuple.getItem4().get(NGSIConstants.JSON_LD_CONTEXT)).onItem()
-						.transform(ctx -> {
-							return Tuple4.of(tuple.getItem1(), tuple.getItem2(), tuple.getItem3(), ctx);
-						}));
-			});
-			if (unis.isEmpty()) {
-				return Uni.createFrom().voidItem();
-			}
-			return Uni.combine().all().unis(unis).with(list -> {
-				for (Object obj : list) {
-					Tuple4<String, Map<String, Object>, String, Context> tuple = (Tuple4<String, Map<String, Object>, String, Context>) obj;
-					SubscriptionRequest request;
-
-					try {
-						request = new SubscriptionRequest(tuple.getItem1(), tuple.getItem2(), tuple.getItem4());
-						request.setContextId(tuple.getItem3());
-						request.getSubscription().addOtherHead(NGSIConstants.LINK_HEADER,
-								"<%s>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
-										.formatted(request.getSubscription().getJsonldContext()));
-						request.getSubscription().addOtherHead(NGSIConstants.TENANT_HEADER, request.getTenant());
-						request.setSendTimestamp(-1);
-						if (isIntervalSub(request)) {
-							synchronized (tableLock) {
-								this.tenant2subscriptionId2IntervalSubscription.put(request.getTenant(),
-										request.getId(),
-										request);
-							}
-
-						} else {
-							synchronized (tableLock) {
-								this.tenant2subscriptionId2Subscription.put(request.getTenant(), request.getId(),
-										request);
-							}
-						}
-						subscriptionId2RequestGlobal.put(request.getId(), request);
-					} catch (Exception e) {
-						logger.error("Failed to load stored subscription " + tuple.getItem1());
-					}
-				}
-				return null;
-
-			});
-
-		});
+		Uni<Void> loadSubs = subDAO.loadSubscriptions().onItem().transformToUni(this::loadStoredSubscriptions);
 
 		Uni<Void> loadRegs = subDAO.getAllRegistries().onItem().transformToUni(regs -> {
 			regs.cellSet().forEach(cell -> {
@@ -459,8 +503,64 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 		this.microServiceUtils.registerCSourceReceiver(this);
 	}
 
+	Uni<Void> loadStoredSubscriptions(
+			List<Tuple4<String, Map<String, Object>, String, Map<String, Object>>> storedSubscriptions) {
+		List<Uni<Void>> unis = Lists.newArrayList();
+		for (Tuple4<String, Map<String, Object>, String, Map<String, Object>> tuple : storedSubscriptions) {
+				String tenant = tuple.getItem1();
+				Map<String, Object> payload = tuple.getItem2();
+				String contextId = tuple.getItem3();
+				String subscriptionId = String.valueOf(payload.get(NGSIConstants.JSON_LD_ID));
+				Map<String, Object> contextBody = tuple.getItem4();
+				if (contextId == null || contextBody == null
+						|| contextBody.get(NGSIConstants.JSON_LD_CONTEXT) == null) {
+					recordInvalidSubscription(tenant, subscriptionId, "missing_context", null);
+					continue;
+				}
+				Uni<Void> loadOne = ldService.parsePure(contextBody.get(NGSIConstants.JSON_LD_CONTEXT)).onItem()
+						.invoke(ctx -> {
+							try {
+								SubscriptionRequest request = new SubscriptionRequest(tenant, payload, ctx);
+								request.setContextId(contextId);
+								request.getSubscription().addOtherHead(NGSIConstants.LINK_HEADER,
+										"<%s>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
+												.formatted(request.getSubscription().getJsonldContext()));
+								request.getSubscription().addOtherHead(NGSIConstants.TENANT_HEADER,
+										request.getTenant());
+								request.setSendTimestamp(-1);
+								storeLoadedSubscription(request);
+							} catch (Exception e) {
+								throw new IllegalStateException("invalid stored subscription", e);
+							}
+						}).replaceWithVoid().onFailure()
+						.invoke(failure -> recordInvalidSubscription(tenant, subscriptionId, "invalid_subscription",
+								failure))
+						.onFailure().recoverWithItem((Void) null);
+				unis.add(loadOne);
+		}
+		if (unis.isEmpty()) {
+			return Uni.createFrom().voidItem();
+		}
+		return Uni.combine().all().unis(unis).with(list -> null);
+	}
+
 	private boolean isIntervalSub(SubscriptionRequest request) {
 		return request.getSubscription().getTimeInterval() > 0;
+	}
+
+	static Map<String, Object> serializeContextForStorage(Context context) {
+		Map<String, Object> storedContext = new HashMap<>(context.serialize());
+		List<String> originalAtContext = context.getOriginalAtContext().stream()
+				.map(url -> url.endsWith("?type=implicitlyCreated")
+						? url.substring(0, url.length() - "?type=implicitlyCreated".length())
+						: url)
+				.filter(url -> !NGSIConstants.CORE_CONTEXT_URLS.contains(url))
+				.distinct()
+				.toList();
+		if (!originalAtContext.isEmpty()) {
+			storedContext.put(NGSIConstants.ORIGINAL_AT_CONTEXT, originalAtContext);
+		}
+		return storedContext;
 	}
 
 	public Uni<NGSILDOperationResult> createSubscription(HeadersMultiMap linkHead, String tenant,
@@ -477,7 +577,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			return Uni.createFrom().failure(e);
 		}
 		SubscriptionTools.setInitTimesSentAndFailed(request);
-		Map<String, Object> tmp = request.getContext().serialize();
+		Map<String, Object> tmp = serializeContextForStorage(request.getContext());
 
 		return localContextService.createImplicitly(tenant, tmp).onItem().transformToUni(contextId -> {
 			String ctxUrl = microServiceUtils.getGatewayString() + NGSIConstants.JSONLD_CONTEXTS + contextId;
@@ -491,16 +591,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			contextList.add(contextEntry);
 			request.getPayload().put(NGSIConstants.NGSI_LD_JSONLD_CONTEXT, contextList);
 			return subDAO.createSubscription(request, contextId).onItem().transformToUni(t -> {
-				if (isIntervalSub(request)) {
-					synchronized (tableLock) {
-						tenant2subscriptionId2IntervalSubscription.put(request.getTenant(), request.getId(), request);
-					}
-				} else {
-					synchronized (tableLock) {
-						tenant2subscriptionId2Subscription.put(tenant, request.getId(), request);
-					}
-				}
-				subscriptionId2RequestGlobal.put(request.getId(), request);
+				storeLoadedSubscription(request);
 				Uni<Void> syncService;
 				if (subscriptionSyncService != null) {
 					logger.debug("sync service");
@@ -520,9 +611,12 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 
 				});
 			}).onFailure().recoverWithUni(e -> {
-				if (e instanceof PgException pge && pge.getSqlState().equals(AppConstants.SQL_ALREADY_EXISTS)) {
+				PgException pge = findPgException(e);
+				if (pge != null && pge.getSqlState().equals(AppConstants.SQL_ALREADY_EXISTS)) {
 					return Uni.createFrom().failure(new ResponseException(ErrorType.AlreadyExists,
 							"Subscription with id " + request.getId() + " exists"));
+				} else if (isPersistenceInvariantViolation(e)) {
+					return Uni.createFrom().failure(persistenceInvariantError(tenant, request.getId(), "created"));
 				} else {
 					return Uni.createFrom().failure(new ResponseException(ErrorType.InternalError, e.getMessage()));
 				}
@@ -641,7 +735,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	public Uni<NGSILDOperationResult> updateSubscription(String tenant, String subscriptionId,
 			Map<String, Object> update, Context context, ViaHeaders viaHeaders) {
 		UpdateSubscriptionRequest request = new UpdateSubscriptionRequest(tenant, subscriptionId, update, context);
-		return localContextService.createImplicitly(tenant, request.getContext().serialize()).onItem()
+		return localContextService.createImplicitly(tenant, serializeContextForStorage(request.getContext())).onItem()
 				.transformToUni(contextId -> {
 					request.setContextId(contextId);
 					return subDAO.updateSubscription(request, contextId).onItem().transformToUni(tup -> {
@@ -664,22 +758,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 								syncService = Uni.createFrom().voidItem();
 							}
 							return syncService.onItem().transformToUni(v2 -> {
-								if (isIntervalSub(updatedRequest)) {
-									synchronized (tableLock) {
-										tenant2subscriptionId2IntervalSubscription.put(tenant, updatedRequest.getId(),
-												updatedRequest);
-										subscriptionId2RequestGlobal.put(updatedRequest.getId(), updatedRequest);
-										tenant2subscriptionId2Subscription.remove(tenant, updatedRequest.getId());
-									}
-								} else {
-									synchronized (tableLock) {
-										tenant2subscriptionId2Subscription.put(tenant, updatedRequest.getId(),
-												updatedRequest);
-										subscriptionId2RequestGlobal.put(updatedRequest.getId(), updatedRequest);
-										tenant2subscriptionId2IntervalSubscription.remove(tenant,
-												updatedRequest.getId());
-									}
-								}
+								storeLoadedSubscription(updatedRequest);
 								// try {
 								// MicroServiceUtils.serializeAndSplitObjectAndEmit(updatedRequest, messageSize,
 								// internalSubEmitter, objectMapper);
@@ -693,17 +772,15 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 							});
 						});
 					});
-				});
+				}).onFailure().transform(failure -> isPersistenceInvariantViolation(failure)
+						? persistenceInvariantError(tenant, subscriptionId, "updated")
+						: failure);
 	}
 
 	public Uni<NGSILDOperationResult> deleteSubscription(String tenant, String subscriptionId) {
 		DeleteSubscriptionRequest request = new DeleteSubscriptionRequest(tenant, subscriptionId);
 		return subDAO.deleteSubscription(request).onItem().transformToUni(t -> {
-			synchronized (tableLock) {
-				tenant2subscriptionId2IntervalSubscription.remove(tenant, subscriptionId);
-				tenant2subscriptionId2Subscription.remove(tenant, subscriptionId);
-				subscriptionId2RequestGlobal.remove(request.getId());
-			}
+			removeLoadedSubscription(tenant, subscriptionId);
 			Uni<Void> syncService;
 			if (subscriptionSyncService != null) {
 				syncService = subscriptionSyncService.sync(request);
@@ -766,7 +843,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 				next = it.next();
 				Map<String, Object> subscriptionData = next.getJsonObject(0).getMap();
 				String subscriptionId = (String) subscriptionData.get(NGSIConstants.JSON_LD_ID);
-				SubscriptionRequest subscriptionRequest = subscriptionId2RequestGlobal.get(subscriptionId);
+				SubscriptionRequest subscriptionRequest = getLoadedSubscription(tenant, subscriptionId);
 				if (subscriptionRequest != null) {
 					subscriptionData.put(NGSIConstants.STATUS, subscriptionRequest.getSubscription().getStatus());
 				}
@@ -797,10 +874,34 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 			if (rows.size() == 0) {
 				return Uni.createFrom().failure(new ResponseException(ErrorType.NotFound, "subscription not found"));
 			}
-			Map<String, Object> rowData = rows.iterator().next().getJsonObject(0).getMap();
-			rowData.put(NGSIConstants.STATUS,
-					subscriptionId2RequestGlobal.get(subscriptionId).getSubscription().getStatus());
-			return Uni.createFrom().item(rowData);
+			Row row = rows.iterator().next();
+			JsonObject contextBody = row.getJsonObject(1);
+			String contextId = row.getString(2);
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
+				recordInvalidSubscription(tenant, subscriptionId, "missing_context", null);
+				return Uni.createFrom().failure(new ResponseException(ErrorType.SubscriptionContextMissing,
+						"Subscription " + subscriptionId + " has no context in tenant " + tenant));
+			}
+			return ldService.parsePure(storedAtContext).onItem().transformToUni(storedContext -> {
+				SubscriptionRequest loadedRequest = getLoadedSubscription(tenant, subscriptionId);
+				if (loadedRequest == null) {
+					return Uni.createFrom().failure(new ResponseException(ErrorType.SubscriptionNotLoaded,
+							"Subscription " + subscriptionId + " is stored but not loaded for tenant " + tenant));
+				}
+				Map<String, Object> rowData = row.getJsonObject(0).getMap();
+				Object originalAtContext = contextBody.getMap().get(NGSIConstants.ORIGINAL_AT_CONTEXT);
+				rowData.put(NGSIConstants.JSON_LD_CONTEXT, originalAtContext == null
+						? storedContext.serialize().get(NGSIConstants.JSON_LD_CONTEXT)
+						: originalAtContext);
+				rowData.put(NGSIConstants.STATUS, loadedRequest.getSubscription().getStatus());
+				return Uni.createFrom().item(rowData);
+			}).onFailure().transform(failure -> {
+				recordInvalidSubscription(tenant, subscriptionId, "invalid_context", failure);
+				return new ResponseException(ErrorType.SubscriptionNotLoaded,
+						"Subscription " + subscriptionId + " has an invalid stored context for tenant " + tenant);
+			});
 		});
 	}
 
@@ -1236,7 +1337,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 
 	}
 
-	private Uni<Void> sendNotification(SubscriptionRequest potentialSub, List<Map<String, Object>> dataToSend) {
+	Uni<Void> sendNotification(SubscriptionRequest potentialSub, List<Map<String, Object>> dataToSend) {
 		if (dataToSend == null || dataToSend.isEmpty()) {
 			return Uni.createFrom().voidItem();
 		}
@@ -1369,8 +1470,29 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 						}
 					}
 					return toSend;
-				});
+				}).onFailure().recoverWithUni(failure -> recordNotificationFailure(potentialSub, failure));
 
+	}
+
+	/**
+	 * A notification that cannot be built (its subscription's context does not resolve, for
+	 * one) fails this subscription only. The notifications of every subscription matching
+	 * the same change are combined with Uni.combine().all(), which cancels the others on the
+	 * first failure: one broken subscription silently starved the healthy ones. Count the
+	 * failure where an operator can see it (timesFailed, lastFailure) instead.
+	 */
+	Uni<Void> recordNotificationFailure(SubscriptionRequest potentialSub, Throwable failure) {
+		logger.error("failed to generate notification for subscription " + potentialSub.getId(), failure);
+		long now = System.currentTimeMillis();
+		potentialSub.getSubscription().getNotification().setLastFailedNotification(now);
+		potentialSub.getSubscription().getNotification().setLastNotification(now);
+		return subDAO
+				.updateNotificationFailure(potentialSub.getTenant(), potentialSub.getId(),
+						SerializationTools.notifiedAt_formatter
+								.format(LocalDateTime.ofInstant(Instant.ofEpochMilli(now), ZoneId.of("Z"))))
+				.onFailure().invoke(e -> logger.error("could not record the notification failure of subscription "
+						+ potentialSub.getId(), e))
+				.onFailure().recoverWithNull().replaceWithVoid();
 	}
 
 	private boolean notificationTriggerCheck(Subscription subscription, int triggerReason) {
@@ -1491,6 +1613,7 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	}
 
 	@Scheduled(every = "${scorpio.subscription.checkinterval}", delayed = "${scorpio.startupdelay}")
+	@io.smallrye.common.annotation.Blocking
 	Uni<Void> checkIntervalSubs() {
 		List<Uni<Void>> unis = Lists.newArrayList();
 		logger.debug("acquiring log for interval");
@@ -1815,53 +1938,45 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 	}
 
 	public Uni<Void> syncDeleteSubscription(String tenant, String subId) {
-		synchronized (tableLock) {
-			tenant2subscriptionId2IntervalSubscription.remove(tenant, subId);
-			tenant2subscriptionId2Subscription.remove(tenant, subId);
-		}
+		removeLoadedSubscription(tenant, subId);
 		return Uni.createFrom().voidItem();
 	}
 
 	public Uni<Void> syncUpdateSubscription(String tenant, String subId) {
 		return subDAO.getSubscription(tenant, subId).onFailure().recoverWithItem(e -> {
-			synchronized (tableLock) {
-				tenant2subscriptionId2IntervalSubscription.remove(tenant, subId);
-				tenant2subscriptionId2Subscription.remove(tenant, subId);
-			}
+			removeLoadedSubscription(tenant, subId);
 			return null;
 		}).onItem().transformToUni(rows -> {
 			if (rows == null || rows.size() == 0) {
 				return Uni.createFrom().voidItem();
 			}
 			Row first = rows.iterator().next();
-			return ldService.parsePure(first.getJsonObject(1).getMap()).onItem().transformToUni(ctx -> {
+			JsonObject contextBody = first.getJsonObject(1);
+			String contextId = first.getString(2);
+			Object storedAtContext = contextBody == null ? null
+					: contextBody.getMap().get(NGSIConstants.JSON_LD_CONTEXT);
+			if (contextId == null || storedAtContext == null) {
+				removeLoadedSubscription(tenant, subId);
+				recordInvalidSubscription(tenant, subId, "missing_context", null);
+				return Uni.createFrom().voidItem();
+			}
+			return ldService.parsePure(storedAtContext).onItem().transformToUni(ctx -> {
 				SubscriptionRequest request;
 				try {
 					request = new SubscriptionRequest(tenant, first.getJsonObject(0).getMap(), ctx);
-					request.setContextId(first.getString(2));
+					request.setContextId(contextId);
 					request.getSubscription().addOtherHead(NGSIConstants.LINK_HEADER,
 							"<%s>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
 									.formatted(request.getSubscription().getJsonldContext()));
 					request.getSubscription().addOtherHead(NGSIConstants.TENANT_HEADER, request.getTenant());
 					request.setSendTimestamp(-1);
-					if (isIntervalSub(request)) {
-						synchronized (tableLock) {
-							tenant2subscriptionId2IntervalSubscription.put(request.getTenant(), request.getId(),
-									request);
-							tenant2subscriptionId2Subscription.remove(tenant, request.getId());
-						}
-					} else {
-						synchronized (tableLock) {
-							tenant2subscriptionId2Subscription.put(request.getTenant(), request.getId(), request);
-							tenant2subscriptionId2IntervalSubscription.remove(tenant, request.getId());
-						}
-					}
-					subscriptionId2RequestGlobal.put(request.getId(), request);
+					storeLoadedSubscription(request);
 				} catch (Exception e) {
-					logger.error("Failed to load stored subscription " + subId);
+					recordInvalidSubscription(tenant, subId, "invalid_subscription", e);
 				}
 				return Uni.createFrom().voidItem();
-			});
+			}).onFailure().invoke(failure -> recordInvalidSubscription(tenant, subId, "invalid_subscription", failure))
+					.onFailure().recoverWithItem((Void) null);
 		});
 	}
 
@@ -1899,6 +2014,12 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 
 	public void reloadSubscription(String tenant, String id) {
 		subDAO.loadSubscription(tenant, id).onItem().transformToUni(t -> {
+			if (t.getItem2() == null || t.getItem3() == null
+					|| t.getItem3().get(NGSIConstants.JSON_LD_CONTEXT) == null) {
+				removeLoadedSubscription(tenant, id);
+				recordInvalidSubscription(tenant, id, "missing_context", null);
+				return Uni.createFrom().voidItem();
+			}
 			return ldService.parsePure(t.getItem3().get(NGSIConstants.JSON_LD_CONTEXT)).onItem().transformToUni(ctx -> {
 				SubscriptionRequest request;
 				try {
@@ -1909,19 +2030,10 @@ public class SubscriptionService implements CSourceHandler, BaseRequestHandler {
 				}
 				request.setSendTimestamp(-1);
 				request.setContextId(t.getItem2());
-				if (isIntervalSub(request)) {
-					synchronized (tableLock) {
-						this.tenant2subscriptionId2IntervalSubscription.put(request.getTenant(), request.getId(),
-								request);
-					}
-				} else {
-					synchronized (tableLock) {
-						this.tenant2subscriptionId2Subscription.put(request.getTenant(), request.getId(), request);
-					}
-				}
-				subscriptionId2RequestGlobal.put(request.getId(), request);
+				storeLoadedSubscription(request);
 				return Uni.createFrom().voidItem();
-			});
+			}).onFailure().invoke(failure -> recordInvalidSubscription(tenant, id, "invalid_subscription", failure))
+					.onFailure().recoverWithItem((Void) null);
 		}).subscribe().with(i -> {
 			logger.debug("Reloaded subscription: " + id);
 		});

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import eu.neclab.ngsildbroker.commons.constants.AppConstants;
+import eu.neclab.ngsildbroker.commons.constants.NGSIConstants;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -142,6 +143,7 @@ public class SubscriptionControllerTest {
 					.get("/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:211").then()
 					.statusCode(Status.OK.getStatusCode()).statusCode(200).extract();
 			assertEquals(200, response.statusCode());
+			Assertions.assertNotNull(response.jsonPath().get(NGSIConstants.JSON_LD_CONTEXT));
 
 		} catch (Exception e) {
 			Assertions.fail();

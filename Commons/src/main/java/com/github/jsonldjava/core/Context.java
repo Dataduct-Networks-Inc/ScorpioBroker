@@ -235,20 +235,8 @@ public class Context extends LinkedHashMap<String, Object> {
 
 				// 3.2.3: Dereference context
 
-				if (uri != null && !uri.startsWith(microServiceUtils.getContextServerURL())) {
-					if (microServiceUtils.gatewayAndAtContextDiffer()) {
-						if (uri.startsWith(microServiceUtils.getGatewayString())) {
-							uri = microServiceUtils.getContextServerURL()
-									+ uri.substring(microServiceUtils.getGatewayString().length());
-						}
-					} else {
-						String encodedUrl = URLEncoder.encode(uri, StandardCharsets.UTF_8);
-						uri = microServiceUtils.getContextServerURL() + NGSIConstants.JSONLD_CONTEXTS + "createcache/"
-								+ encodedUrl;
-						logger.debug("replacing original uri " + uri);
-					}
-
-				}
+				uri = routeRemoteContext(uri, microServiceUtils.getGatewayString(),
+						microServiceUtils.getContextServerURL());
 				logger.debug("calling document loader from context parsing for uri " + uri);
 				rds.add(this.options.getDocumentLoader().loadDocument(uri, webClient).onItem()
 						.transform(rd -> Tuple2.of(rd, context)));
@@ -381,6 +369,17 @@ public class Context extends LinkedHashMap<String, Object> {
 			// 3.2.4
 
 		}
+	}
+
+	static String routeRemoteContext(String uri, String gatewayUrl, String contextServerUrl) {
+		if (uri == null || uri.startsWith(contextServerUrl)) {
+			return uri;
+		}
+		if (uri.startsWith(gatewayUrl)) {
+			return contextServerUrl + uri.substring(gatewayUrl.length());
+		}
+		String encodedUrl = URLEncoder.encode(uri, StandardCharsets.UTF_8);
+		return contextServerUrl + NGSIConstants.JSONLD_CONTEXTS + "createcache/" + encodedUrl;
 	}
 
 	public void setOriginalAtContext(List<String> originalAtContext) {
