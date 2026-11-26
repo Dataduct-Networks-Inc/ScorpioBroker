@@ -50,6 +50,23 @@ void startup() {
 		atContextUrl = microServiceUtils.getGatewayString() + NGSIConstants.JSONLD_CONTEXTS;
 	}
 
+	/**
+	 * A context is addressed by its URL alone ({@code GET /ngsi-ld/v1/jsonldContexts/{id}}),
+	 * and nothing that resolves that URL (the JSON-LD loader at notification time, any
+	 * client) sends a tenant. So every implicitly created context must also live in the
+	 * default database. The id is a hash of the content, so the same id never names two
+	 * bodies and the shared insert can ignore an existing row.
+	 */
+	static final String INSERT_SHARED_IMPLICIT_SQL = "INSERT INTO public.contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') ON CONFLICT (id) DO NOTHING";
+
+	static final String INSERT_TENANT_IMPLICIT_SQL = "INSERT INTO public.contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') returning id";
+
+	static final String SELECT_TENANTS_SQL = "SELECT tenant_id FROM tenant ORDER BY tenant_id";
+
+	static final String SELECT_CONTEXT_SQL = "SELECT * FROM contexts WHERE id=$1";
+
+	static final String COPY_TO_SHARED_SQL = "INSERT INTO public.contexts (id, body, kind, createdat) values($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING";
+
 	public Uni<Map<String, Object>> getById(String id, Boolean details) {
 		String sql = """
 				with a as(select * from contexts WHERE id=$1),
@@ -58,34 +75,69 @@ void startup() {
 
 		return connectionManager.executeQuery(null, sql, Tuple.of(id), false).onItem().transformToUni(rows -> {
 			if (rows.size() > 0) {
-				Row row = rows.iterator().next();
-
-				Map<String, Object> result = new HashMap<>();
-				if (details) {
-					String localId = row.getString(NGSIConstants.ID);
-					result.put(NGSIConstants.LOCAL_ID, localId);
-					result.put(NGSIConstants.KIND, row.getString(NGSIConstants.KIND));
-					result.put(NGSIConstants.NUMBER_OF_HITS,
-							row.getLong(NGSIConstants.NUMBER_OF_HITS.toLowerCase()));
-					LocalDateTime lastUsage = row.getLocalDateTime(NGSIConstants.LAST_USAGE.toLowerCase());
-					LocalDateTime createdAt = row.getLocalDateTime(NGSIConstants.CREATEDAT.toLowerCase());
-					if (lastUsage != null) {
-
-						result.put(NGSIConstants.LAST_USAGE, SerializationTools.formatter.format(lastUsage));
-					}
-					result.put(NGSIConstants.URL,
-							atContextUrl + URLEncoder.encode(localId, StandardCharsets.UTF_8));
-					result.put(NGSIConstants.BODY, row.getJsonObject(NGSIConstants.BODY).getMap());
-					result.put(NGSIConstants.CREATEDAT, SerializationTools.formatter.format(createdAt));
-					return Uni.createFrom().item(result);
-				} else
-					return Uni.createFrom().item(row.getJsonObject(NGSIConstants.BODY).getMap());
-
-			} else
-				return Uni.createFrom()
-						.failure(new ResponseException(ErrorType.NotFound, "The context was not found"));
+				return Uni.createFrom().item(toResult(rows.iterator().next(), details));
+			}
+			return findInTenantDatabases(id).onItem().transformToUni(row -> {
+				if (row == null) {
+					return Uni.createFrom()
+							.failure(new ResponseException(ErrorType.NotFound, "The context was not found"));
+				}
+				return Uni.createFrom().item(toResult(row, details));
+			});
 		});
 
+	}
+
+	/**
+	 * The 2026-08-25 builds stored implicitly created contexts only in their tenant's
+	 * database, so their URLs answered 404 and their subscriptions never notified. Find
+	 * such a context there and copy it to the default database, so its URL resolves from
+	 * then on. Only a miss in the default database pays for this search.
+	 */
+	Uni<Row> findInTenantDatabases(String id) {
+		return connectionManager.executeQuery(null, SELECT_TENANTS_SQL, null, false).onItem().transformToUni(tenants -> {
+			Uni<Row> found = Uni.createFrom().nullItem();
+			for (Row tenantRow : tenants) {
+				String tenant = tenantRow.getString(0);
+				found = found.onItem().ifNull().switchTo(() -> connectionManager
+						.executeQuery(tenant, SELECT_CONTEXT_SQL, Tuple.of(id), false).onItem()
+						.transform(rows -> rows.size() > 0 ? rows.iterator().next() : (Row) null).onFailure()
+						.recoverWithItem(failure -> {
+							logger.warn("context lookup in tenant " + tenant + " failed", failure);
+							return null;
+						}));
+			}
+			return found.onItem().ifNotNull().call(row -> connectionManager
+					.executeQuery(null, COPY_TO_SHARED_SQL,
+							Tuple.of(id, row.getJsonObject(NGSIConstants.BODY), row.getString(NGSIConstants.KIND),
+									row.getLocalDateTime(NGSIConstants.CREATEDAT.toLowerCase())),
+							false)
+					.onFailure().invoke(failure -> logger.warn("could not copy context " + id + " to the default database",
+							failure))
+					.onFailure().recoverWithNull());
+		});
+	}
+
+	private Map<String, Object> toResult(Row row, boolean details) {
+		if (!details) {
+			return row.getJsonObject(NGSIConstants.BODY).getMap();
+		}
+		Map<String, Object> result = new HashMap<>();
+		String localId = row.getString(NGSIConstants.ID);
+		result.put(NGSIConstants.LOCAL_ID, localId);
+		result.put(NGSIConstants.KIND, row.getString(NGSIConstants.KIND));
+		result.put(NGSIConstants.NUMBER_OF_HITS, row.getLong(NGSIConstants.NUMBER_OF_HITS.toLowerCase()));
+		LocalDateTime lastUsage = row.getLocalDateTime(NGSIConstants.LAST_USAGE.toLowerCase());
+		LocalDateTime createdAt = row.getLocalDateTime(NGSIConstants.CREATEDAT.toLowerCase());
+		if (lastUsage != null) {
+			result.put(NGSIConstants.LAST_USAGE, SerializationTools.formatter.format(lastUsage));
+		}
+		result.put(NGSIConstants.URL, atContextUrl + URLEncoder.encode(localId, StandardCharsets.UTF_8));
+		result.put(NGSIConstants.BODY, row.getJsonObject(NGSIConstants.BODY).getMap());
+		if (createdAt != null) {
+			result.put(NGSIConstants.CREATEDAT, SerializationTools.formatter.format(createdAt));
+		}
+		return result;
 	}
 
 	public Uni<String> hostContext(Map<String, Object> payload) {
@@ -188,8 +240,23 @@ void startup() {
 			sb.append(Integer.toHexString((b & 0xFF) | 0x100), 1, 3);
 		}
 		String id = "urn:" + sb;
-		String sql = "INSERT INTO public.contexts (id, body, kind) values($1, $2, 'ImplicitlyCreated') returning id";
-		return connectionManager.executeQuery(tenant, sql, Tuple.of(id, new JsonObject(payload)), true).onItemOrFailure()
+		JsonObject body = new JsonObject(payload);
+		// Shared copy first, so the URL resolves before a subscription can point at it; then
+		// the tenant copy, which the subscriptions_context_fkey constraint needs.
+		return connectionManager.executeQuery(null, INSERT_SHARED_IMPLICIT_SQL, Tuple.of(id, body), false)
+				.onItemOrFailure().transformToUni((sharedRows, sharedFailure) -> {
+					if (sharedFailure != null) {
+						logger.error("could not store context " + id + " in the default database", sharedFailure);
+						return Uni.createFrom().item(RestResponse.<Object>status(
+								RestResponse.Status.INTERNAL_SERVER_ERROR, sharedFailure.getMessage()));
+					}
+					return insertTenantCopy(tenant, id, body);
+				});
+
+	}
+
+	private Uni<RestResponse<Object>> insertTenantCopy(String tenant, String id, JsonObject body) {
+		return connectionManager.executeQuery(tenant, INSERT_TENANT_IMPLICIT_SQL, Tuple.of(id, body), true).onItemOrFailure()
 				.transform((rows, failure) -> {
 					if (failure != null) {
 						if (failure instanceof PgException
