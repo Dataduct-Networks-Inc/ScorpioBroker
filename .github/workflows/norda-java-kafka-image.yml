@@ -46,7 +46,7 @@ jobs:
           -Pkafka
           -Dkafka
           -Dquarkus.profile=kafka
-          -Dtest=ContextControllerTest,ContextDaoTest,SubscriptionContextRetrievalTest,SubscriptionControllerStoredContextTest,SubscriptionIntegrityTest,SubscriptionServiceTest
+          -Dtest=ContextControllerTest,ContextDaoTest,SubscriptionContextRetrievalTest,SubscriptionControllerStoredContextTest,SubscriptionIntegrityTest,SubscriptionServiceTest,SubscriptionNotificationIsolationTest
           -Dsurefire.failIfNoSpecifiedTests=false
           -pl AtContextServer,SubscriptionManager
           -am
